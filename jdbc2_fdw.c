@@ -466,8 +466,11 @@ jdbcGetForeignRelSize(PlannerInfo *root,
      * columns used in them.  Doesn't seem worth detecting that case though.)
      */
     fpinfo->attrs_used = NULL;
-    pull_varattnos((Node *) baserel->reltargetlist, baserel->relid,
-                   &fpinfo->attrs_used);
+#if PG_VERSION_NUM >= 90600
+    pull_varattnos((Node *) baserel->reltarget->exprs, baserel->relid, &fpinfo->attrs_used);
+#else
+    pull_varattnos((Node *) baserel->reltargetlist, baserel->relid, &fpinfo->attrs_used);
+#endif
     foreach(lc, fpinfo->local_conds)
     {
         RestrictInfo *rinfo = (RestrictInfo *) lfirst(lc);
@@ -509,7 +512,7 @@ jdbcGetForeignRelSize(PlannerInfo *root,
 
         /* Report estimated baserel size to planner. */
         baserel->rows = fpinfo->rows;
-        baserel->width = fpinfo->width;
+        baserel->reltarget->width = fpinfo->width;
     }
     else
     {
@@ -526,7 +529,7 @@ jdbcGetForeignRelSize(PlannerInfo *root,
         {
             baserel->pages = 10;
             baserel->tuples =
-                (10 * BLCKSZ) / (baserel->width + sizeof(HeapTupleHeaderData));
+                (10 * BLCKSZ) / (baserel->reltarget->width + sizeof(HeapTupleHeaderData));
         }
 
         /* Estimate baserel size as best we can with local statistics. */
@@ -561,11 +564,15 @@ jdbcGetForeignPaths(PlannerInfo *root,
      * to estimate cost and size of this path.
      */
     path = create_foreignscan_path(root, baserel,
+//#if PG_VERSION_NUM >= 90600
+                                   NULL,/* PathTarget */
+//#endif
                                    fpinfo->rows,
                                    fpinfo->startup_cost,
                                    fpinfo->total_cost,
                                    NIL, /* no pathkeys */
                                    NULL,        /* no outer rel either */
+                                   NULL,
                                    NIL);        /* no fdw_private list */
     add_path(baserel, (Path *) path);
 
@@ -716,7 +723,8 @@ jdbcGetForeignPlan(PlannerInfo *root,
                             local_exprs,
                             scan_relid,
                             params_list,
-                            fdw_private);
+                            fdw_private,NIL /* fdw_scan_tlist */, NIL, /* fdw_recheck_quals */
+	                        NULL /* outer_plan */);
 }
 
 /*
@@ -1027,13 +1035,15 @@ postgresPlanForeignModify(PlannerInfo *root,
     }
     else if (operation == CMD_UPDATE)
     {
-        Bitmapset  *tmpset = bms_copy(rte->modifiedCols);
-        AttrNumber  col;
-
-        while ((col = bms_first_member(tmpset)) >= 0)
+        int  col;
+	
+	col = -1;
+        while ((col = bms_next_member(rte->updatedCols, col)) >= 0)
         {
-            col += FirstLowInvalidHeapAttributeNumber;
-            if (col <= InvalidAttrNumber)       /* shouldn't happen */
+	    /* bit numbers are offset by FirstLowInvalidHeapAttributeNumber */
+	    AttrNumber	attno = col + FirstLowInvalidHeapAttributeNumber;
+
+            if (attno <= InvalidAttrNumber)       /* shouldn't happen */
                 elog(ERROR, "system-column update is not supported");
             targetAttrs = lappend_int(targetAttrs, col);
         }
@@ -1615,7 +1625,7 @@ estimate_path_cost_size(PlannerInfo *root,
 
         /* Use rows/width estimates made by set_baserel_size_estimates. */
         rows = baserel->rows;
-        width = baserel->width;
+        width = baserel->reltarget->width;
 
         /*
          * Back into an estimate of the number of retrieved rows.  Just in
@@ -1938,15 +1948,15 @@ set_transmission_modes(void)
     if (DateStyle != USE_ISO_DATES)
         (void) set_config_option("datestyle", "ISO",
                                  PGC_USERSET, PGC_S_SESSION,
-                                 GUC_ACTION_SAVE, true, 0);
+                                 GUC_ACTION_SAVE, true, 0,false);
     if (IntervalStyle != INTSTYLE_POSTGRES)
         (void) set_config_option("intervalstyle", "postgres",
                                  PGC_USERSET, PGC_S_SESSION,
-                                 GUC_ACTION_SAVE, true, 0);
+                                 GUC_ACTION_SAVE, true, 0,false);
     if (extra_float_digits < 3)
         (void) set_config_option("extra_float_digits", "3",
                                  PGC_USERSET, PGC_S_SESSION,
-                                 GUC_ACTION_SAVE, true, 0);
+                                 GUC_ACTION_SAVE, true, 0,false);
 
     return nestlevel;
 }
